@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 from matplotlib.patches import Arc
 from matplotlib.widgets import Button,RadioButtons, TextBox
+import math
 import numpy as np
 import xgboost as xgb
 
@@ -25,7 +26,7 @@ def calculateAngle(x,y):
     v0 = np.array(g0) - np.array(p)
     v1 = np.array(g1) - np.array(p)
 
-    angle = np.math.atan2(np.linalg.det([v0,v1]),np.dot(v0,v1))
+    angle = math.atan2(np.linalg.det([v0,v1]),np.dot(v0,v1))
     return(abs(np.degrees(angle)))
 
 def calculateDistanceShooterGk(x1,y1,x2,y2):
