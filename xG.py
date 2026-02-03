@@ -1,214 +1,168 @@
-import matplotlib.pyplot as plt
-from matplotlib.patches import Arc
-from matplotlib.widgets import Button,RadioButtons, TextBox
-import math
+import streamlit as st
 import numpy as np
 import xgboost as xgb
-
-def set_shot_type(event, type):
-    global selected_type
-    selected_type = type
-    print(f"Selected shot type: {type}")
-def calculateDistance(x,y):
-    x_distance=120-x
-    y_distance=0
-    if (y<36):
-        y_distance = 36-y
-    elif (y>44):
-        y_distance = y-44
-    return np.sqrt(y_distance**2+x_distance**2)
-
-def calculateAngle(x,y):
-    g0 = [120, 44]
-    p = [x, y]
-    g1 = [120, 36]
-
-    v0 = np.array(g0) - np.array(p)
-    v1 = np.array(g1) - np.array(p)
-
-    angle = math.atan2(np.linalg.det([v0,v1]),np.dot(v0,v1))
-    return(abs(np.degrees(angle)))
-
-def calculateDistanceShooterGk(x1,y1,x2,y2):
-    return np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
-
-def Minus(x1,x2):
-    return x1-x2
-
-def calculate_xG_inside_one_v_one(x, y,x_gk,y_gk,num_opposing_players, model):
-    distance = calculateDistance(x, y)
-    angle = calculateAngle(x, y)
-    DistanceShooterGk = calculateDistanceShooterGk(x,y,x_gk,y_gk)
-    DistanceGk=calculateDistance(x_gk,y_gk)
-    features = np.array([[angle,distance,DistanceShooterGk,DistanceGk,num_opposing_players]])
-    dmatrix_x = xgb.DMatrix(features, feature_names=['angle','distance','DistanceShooterGk','DistanceGk','num_opposing_players'])
-    return model.predict(dmatrix_x)
-
-def calculate_xG_inside_not_one_v_one(x, y,x_gk,y_gk,num_opposing_players, model):
-    distance = calculateDistance(x, y)
-    angle = calculateAngle(x, y)
-    DistanceGk=calculateDistance(x_gk,y_gk)
-    features = np.array([[angle,distance,y_gk,x_gk,DistanceGk,num_opposing_players]])
-    dmatrix_x = xgb.DMatrix(features, feature_names=['angle','distance','y_gk','x_gk','DistanceGk','num_opposing_players'])
-    return model.predict(dmatrix_x)
-
-def calculate_xG_outside(x, y,x_gk,y_gk, model):
-    distance = calculateDistance(x, y)
-    angle = calculateAngle(x, y)
-    DistanceShooterGk = calculateDistanceShooterGk(x,y,x_gk,y_gk)
-    minus=Minus(x,x_gk)
-    features = np.array([[angle,y,DistanceShooterGk,distance,minus]])
-    dmatrix_x = xgb.DMatrix(features, feature_names=['angle','y','DistanceShooterGk','distance','minus'])
-    return model.predict(dmatrix_x)
-
-def calculate_xG_head(x,y,model):
-    distance = calculateDistance(x, y)
-    angle = calculateAngle(x, y)
-    x = [[angle, distance]]
-    return model.predict_proba(x)[:, 1]
-
-model_xG_inside_one_v_one= xgb.Booster()
-model_xG_inside_one_v_one.load_model('models/xG_foot_openplay_inside_1on1.json')
-
-model_xG_inside_not_one_v_one= xgb.Booster()
-model_xG_inside_not_one_v_one.load_model('models/xG_foot_openplay_inside_not_1on1.json')
-
-model_xG_outside= xgb.Booster()
-model_xG_outside.load_model('models/xG_foot_openplay_outside.json')
-
+from mplsoccer import Pitch
 from joblib import load
-model_xG_head= load('models/xG_head.joblib')
+import math
 
-def draw_pitch(ax):
-    ax.plot([0, 120, 120, 0, 0], [0, 0, 80, 80, 0], color="black", lw=2)
+# --- CONFIGURATION DE LA PAGE ---
+st.set_page_config(page_title="Football xG Predictor", layout="wide")
 
-    ax.plot([120, 120, 114.5, 114.5, 120], [31, 49, 49, 31, 31], color="black", lw=2)
+st.markdown("""
+    <style>
+    [data-testid="stMetricValue"] {
+        color: #00ff00 !important;
+        background-color: #0e1117;
+        padding: 5px 10px;
+        border-radius: 5px;
+    }
+    .stMetric {
+        background-color: #161b22;
+        padding: 15px;
+        border-radius: 10px;
+        border: 1px solid #30363d;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
-    ax.plot([120, 120, 103.5, 103.5, 120], [20, 60, 60, 20, 20], color="black", lw=2)
 
-    ax.scatter(109, 40, color="black", s=20)
+# --- CHARGEMENT DES MODÈLES (CACHE) ---
+@st.cache_resource
+def load_all_models():
+    # Chemins à adapter selon ton dossier
+    m1 = xgb.Booster();
+    m1.load_model('models/xG_foot_openplay_inside_1on1.json')
+    m2 = xgb.Booster();
+    m2.load_model('models/xG_foot_openplay_inside_not_1on1.json')
+    m3 = xgb.Booster();
+    m3.load_model('models/xG_foot_openplay_outside.json')
+    m4 = load('models/xG_head.joblib')
+    return m1, m2, m3, m4
 
-    center_circle = plt.Circle((60, 40), 10, color="black", fill=False, lw=2)
-    ax.add_patch(center_circle)
 
-    ax.plot([60, 60], [0, 80], color="black", lw=2)
+try:
+    model_1v1, model_not_1v1, model_outside, model_head = load_all_models()
+except Exception as e:
+    st.error(f"Erreur de chargement des modèles : {e}. Vérifiez le dossier 'models/'.")
 
-    arc = Arc((109, 40), height=18.3, width=18.3, angle=180, theta1=308, theta2=52, color="black", lw=2)
-    ax.add_patch(arc)
 
-    ax.scatter(120, 36, color="green", s=50, zorder=5)  
-    ax.scatter(120, 44, color="green", s=50, zorder=5) 
+# --- FONCTIONS DE CALCUL (TES LOGIQUES) ---
+def calculateDistance(x, y):
+    x_distance = 120 - x
+    y_distance = 0
+    if y < 36:
+        y_distance = 36 - y
+    elif y > 44:
+        y_distance = y - 44
+    return np.sqrt(y_distance ** 2 + x_distance ** 2)
 
-selected_type=None
-selected_num_players=0
-selected_one_v_one=False
-step = "shooter"  
-shooter_position = None
-gk_position = None
 
-def onclick(event):
-    global step, shooter_position, gk_position, selected_num_players, selected_one_v_one
+def calculateAngle(x, y):
+    v0 = np.array([120, 44]) - np.array([x, y])
+    v1 = np.array([120, 36]) - np.array([x, y])
+    angle = math.atan2(np.linalg.det([v0, v1]), np.dot(v0, v1))
+    return abs(np.degrees(angle))
 
-    x, y = event.xdata, event.ydata
-    while x is None or y is None:
-        x, y = event.xdata, event.ydata
 
-    if step == "shooter" and selected_type == "Foot":
-        gk_position = None
-        shooter_position = (x, y)
-        ax.scatter(x, y, color="red", s=50, zorder=5)
-        fig.canvas.draw()
-        print(f"Shooter position: x={x:.2f}, y={y:.2f}")
-        step = "goalkeeper"
-        print("Click on the pitch to select the goalkeeper's position.")
+# --- BARRE LATÉRALE ---
+st.sidebar.header("🛡️ Paramètres du Tir")
 
-    elif step == "goalkeeper" and selected_type == "Foot":
-        gk_position = (x, y)
-        ax.scatter(x, y, color="blue", s=50, zorder=5)
-        fig.canvas.draw()
-        print(f"Goalkeeper position: x={x:.2f}, y={y:.2f}")
-        step = "num_players" 
-        print("Enter the number of opposing players in the text box.")
+shot_category = st.sidebar.radio("Type de Tir", ["Pied", "Tête", "Penalty"])
 
-    elif step == "num_players" and selected_type == "Foot":
-        print("Awaiting number of players from TextBox...")
+# Paramètres dynamiques selon le type
+if shot_category != "Penalty":
+    st.sidebar.subheader("Positions")
+    # Attaquant
+    s_x = st.sidebar.slider("Attaquant : Distance (X)", 60.0, 120.0, 105.0)
+    s_y = st.sidebar.slider("Attaquant : Latéral (Y)", 0.0, 80.0, 40.0)
 
-    elif step == "1v1" and selected_type == "Foot":
-        print("Awaiting 1v1 selection from RadioButtons...")
-        step="shooter"
-
-    elif selected_type == "Head":
-        ax.scatter(x, y, color="red", s=50, zorder=5)
-        fig.canvas.draw()
-        xG = calculate_xG_head(x, y, model_xG_head)
-        ax.text(x, y + 1, f"{xG[0]:.2f}", color="green", fontsize=10, zorder=6)
-        fig.canvas.draw()
-        step="shooter"
-
-    elif selected_type == "Penalty":
-        x, y = 109, 40
-        ax.scatter(x, y, color="red", s=50, zorder=5)
-        xG = [0.74045802]
-        ax.text(x, y + 1, f"{xG[0]:.2f}", color="green", fontsize=10, zorder=6)
-        fig.canvas.draw()
-        step="shooter"
-
-def update_num_players(val):
-    global selected_num_players, step
-    try:
-        selected_num_players = int(val)
-        print(f"Number of opposing players: {selected_num_players}")
-        step = "1v1"  
-        print("Select 1v1 status using the radio buttons.")
-    except ValueError:
-        print("Please enter a valid number.")
-
-def update_one_v_one(label):
-    global selected_one_v_one, step, shooter_position, gk_position
-
-    selected_one_v_one = label == "True"
-    print(f"1v1 selected: {selected_one_v_one}")
-
-    x, y = shooter_position
-    x_gk, y_gk = gk_position
-    dist = calculateDistance(x, y)
-
-    if dist > 20 and x > 103.5 and (y < 20 or y > 60):
-        xG = calculate_xG_outside(x, y, x_gk, y_gk, model_xG_outside)
+    # Gardien (uniquement pour le pied)
+    if shot_category == "Pied":
+        st.sidebar.subheader("Environnement")
+        gk_x = st.sidebar.slider("Gardien : Position X", 100.0, 120.0, 118.0)
+        gk_y = st.sidebar.slider("Gardien : Position Y", 30.0, 50.0, 40.0)
+        num_opp = st.sidebar.number_input("Nombre d'adversaires proches", 0, 10, 1)
+        is_1v1 = st.sidebar.checkbox("Situation de 1v1", value=False)
     else:
-        if selected_one_v_one:
-            xG = calculate_xG_inside_one_v_one(x, y, x_gk, y_gk, selected_num_players, model_xG_inside_one_v_one)
+        gk_x, gk_y, num_opp, is_1v1 = 118, 40, 0, False
+else:
+    s_x, s_y, gk_x, gk_y = 109.0, 40.0, 119.0, 40.0
+
+
+# --- CALCUL xG ---
+def get_prediction():
+    dist = calculateDistance(s_x, s_y)
+    angle = calculateAngle(s_x, s_y)
+
+    if shot_category == "Penalty":
+        return 0.74  # Valeur de ton code original
+
+    if shot_category == "Tête":
+        return model_head.predict_proba([[angle, dist]])[0][1]
+
+    # Cas du Pied
+    dist_shooter_gk = np.sqrt((s_x - gk_x) ** 2 + (s_y - gk_y) ** 2)
+
+    if dist > 20 and s_x > 103.5 and (s_y < 20 or s_y > 60):  # Logique Outside
+        minus = s_x - gk_x
+        feat = np.array([[angle, s_y, dist_shooter_gk, dist, minus]])
+        dm = xgb.DMatrix(feat, feature_names=['angle', 'y', 'DistanceShooterGk', 'distance', 'minus'])
+        return model_outside.predict(dm)[0]
+    else:
+        dist_gk = calculateDistance(gk_x, gk_y)
+        if is_1v1:
+            feat = np.array([[angle, dist, dist_shooter_gk, dist_gk, num_opp]])
+            dm = xgb.DMatrix(feat, feature_names=['angle', 'distance', 'DistanceShooterGk', 'DistanceGk',
+                                                  'num_opposing_players'])
+            return model_1v1.predict(dm)[0]
         else:
-            xG = calculate_xG_inside_not_one_v_one(x, y, x_gk, y_gk, selected_num_players, model_xG_inside_not_one_v_one)
+            feat = np.array([[angle, dist, gk_y, gk_x, dist_gk, num_opp]])
+            dm = xgb.DMatrix(feat,
+                             feature_names=['angle', 'distance', 'y_gk', 'x_gk', 'DistanceGk', 'num_opposing_players'])
+            return model_not_1v1.predict(dm)[0]
 
-    print(f"xG for foot shot: {xG[0]:.2f}")
-    ax.text(x, y, f"{xG[0]:.2f}", color="green", fontsize=10, zorder=6)
-    fig.canvas.draw()
 
+xg_val = get_prediction()
 
-fig, ax = plt.subplots(figsize=(12, 8))
-ax.set_xlim(0, 120)
-ax.set_ylim(0, 80)
-draw_pitch(ax)
+# --- AFFICHAGE PRINCIPAL ---
+st.title("⚽ Analyseur d'Expected Goals (xG)")
 
-ax_head = plt.axes([0.1, 0.92, 0.1, 0.05])
-ax_foot = plt.axes([0.3, 0.92, 0.1, 0.05])
-ax_penalty = plt.axes([0.5, 0.92, 0.1, 0.05])
-ax_text = plt.axes([0.7, 0.92, 0.1, 0.05])
-ax_radio = plt.axes([0.85, 0.92, 0.1, 0.05])
+col1, col2 = st.columns([2, 1])
 
-btn_head = Button(ax_head, "Head")
-btn_foot = Button(ax_foot, "Foot")
-btn_penalty = Button(ax_penalty, "Penalty")
-text_box = TextBox(ax_text, "Players")
-radio = RadioButtons(ax_radio, ["True", "False"])
+with col1:
+    # Dessin du terrain avec mplsoccer
+    pitch = Pitch(pitch_type='custom', pitch_length=120, pitch_width=80,
+                  pitch_color='#224422', line_color='white', goal_type='box')
+    fig, ax = pitch.draw(figsize=(10, 7))
 
-btn_head.on_clicked(lambda event: set_shot_type(event, "Head"))
-btn_foot.on_clicked(lambda event: set_shot_type(event, "Foot"))
-btn_penalty.on_clicked(lambda event: set_shot_type(event, "Penalty"))
-text_box.on_submit(update_num_players)
-radio.on_clicked(update_one_v_one)
+    # Dessiner les buts (green dans ton code)
+    ax.scatter([120, 120], [36, 44], color="lime", s=100, zorder=5)
 
-cid = fig.canvas.mpl_connect('button_press_event', onclick)
+    # Shooter
+    pitch.scatter(s_x, s_y, s=300, c='#e74c3c', edgecolors='white', marker='o', label='Buteur', ax=ax)
+    # Gardien (si applicable)
+    if shot_category == "Pied":
+        pitch.scatter(gk_x, gk_y, s=250, c='#3498db', edgecolors='white', marker='s', label='Gardien', ax=ax)
 
-plt.show()
+    # Ligne de tir
+    ax.plot([s_x, 120], [s_y, 40], color='white', linestyle='--', alpha=0.3)
+
+    ax.legend(facecolor='#224422', edgecolor='white', labelcolor='white')
+    st.pyplot(fig)
+
+with col2:
+    st.metric(label="Probabilité de but (xG)", value=f"{xg_val:.3f}")
+
+    # Barre de progression pour le visuel
+    st.progress(min(float(xg_val), 1.0))
+
+    st.markdown("### 📊 Statistiques du tir")
+    st.write(f"**Distance au but :** {calculateDistance(s_x, s_y):.1f}m")
+    st.write(f"**Angle de tir :** {calculateAngle(s_x, s_y):.1f}°")
+
+    if xg_val > 0.3:
+        st.success("C'est une grosse occasion !")
+    elif xg_val > 0.1:
+        st.warning("Occasion dangereuse.")
+    else:
+        st.error("Tir très difficile.")
