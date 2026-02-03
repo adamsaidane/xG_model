@@ -4,6 +4,9 @@ import xgboost as xgb
 from mplsoccer import Pitch
 from joblib import load
 import math
+from streamlit_image_coordinates import streamlit_image_coordinates
+import io
+from PIL import Image
 
 # --- CONFIGURATION DE LA PAGE ---
 st.set_page_config(page_title="Football xG Predictor", layout="wide")
@@ -25,8 +28,14 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# --- INITIALISATION DES POSITIONS (SESSION STATE) ---
+if "s_x" not in st.session_state:
+    st.session_state.s_x, st.session_state.s_y = 105.0, 40.0
+if "gk_x" not in st.session_state:
+    st.session_state.gk_x, st.session_state.gk_y = 118.0, 40.0
 
-# --- CHARGEMENT DES MODÈLES (CACHE) ---
+
+# --- CHARGEMENT DES MODÈLES ---
 @st.cache_resource
 def load_all_models():
     # Chemins à adapter selon ton dossier
@@ -46,15 +55,15 @@ except Exception as e:
     st.error(f"Erreur de chargement des modèles : {e}. Vérifiez le dossier 'models/'.")
 
 
-# --- FONCTIONS DE CALCUL (TES LOGIQUES) ---
+# --- FONCTIONS DE CALCUL ---
 def calculateDistance(x, y):
-    x_distance = 120 - x
-    y_distance = 0
+    x_dist = 120 - x
+    y_dist = 0
     if y < 36:
-        y_distance = 36 - y
+        y_dist = 36 - y
     elif y > 44:
-        y_distance = y - 44
-    return np.sqrt(y_distance ** 2 + x_distance ** 2)
+        y_dist = y - 44
+    return np.sqrt(y_dist ** 2 + x_dist ** 2)
 
 
 def calculateAngle(x, y):
@@ -69,57 +78,53 @@ st.sidebar.header("🛡️ Paramètres du Tir")
 
 shot_category = st.sidebar.radio("Type de Tir", ["Pied", "Tête", "Penalty"])
 
-# Paramètres dynamiques selon le type
+selection_mode = "Le Buteur"
 if shot_category != "Penalty":
-    st.sidebar.subheader("Positions")
-    # Attaquant
-    s_x = st.sidebar.slider("Attaquant : Distance (X)", 60.0, 120.0, 105.0)
-    s_y = st.sidebar.slider("Attaquant : Latéral (Y)", 0.0, 80.0, 40.0)
-
-    # Gardien (uniquement pour le pied)
     if shot_category == "Pied":
-        st.sidebar.subheader("Environnement")
-        gk_x = st.sidebar.slider("Gardien : Position X", 100.0, 120.0, 118.0)
-        gk_y = st.sidebar.slider("Gardien : Position Y", 30.0, 50.0, 40.0)
-        num_opp = st.sidebar.number_input("Nombre d'adversaires proches", 0, 10, 1)
+        st.sidebar.subheader("Sélection au clic")
+        selection_mode = st.sidebar.selectbox("🎯 Cliquer pour placer :", ["Le Buteur", "Le Gardien"])
+        num_opp = st.sidebar.number_input("Adversaires proches", 0, 10, 1)
         is_1v1 = st.sidebar.checkbox("Situation de 1v1", value=False)
     else:
-        gk_x, gk_y, num_opp, is_1v1 = 118, 40, 0, False
+        num_opp, is_1v1 = 0, False
+
+    if st.sidebar.button("Réinitialiser positions"):
+        st.session_state.s_x, st.session_state.s_y = 105.0, 40.0
+        st.session_state.gk_x, st.session_state.gk_y = 118.0, 40.0
+        st.rerun()
 else:
-    s_x, s_y, gk_x, gk_y = 109.0, 40.0, 119.0, 40.0
+    st.session_state.s_x, st.session_state.s_y, st.session_state.gk_x, st.session_state.gk_y = 109.0, 40.0, 119.0, 40.0
 
-
-# --- CALCUL xG ---
+# --- LOGIQUE PRÉDICTION xG ---
 def get_prediction():
-    dist = calculateDistance(s_x, s_y)
-    angle = calculateAngle(s_x, s_y)
+    sx, sy = st.session_state.s_x, st.session_state.s_y
+    gx, gy = st.session_state.gk_x, st.session_state.gk_y
+    dist = calculateDistance(sx, sy)
+    angle = calculateAngle(sx, sy)
 
-    if shot_category == "Penalty":
-        return 0.74  # Valeur de ton code original
-
-    if shot_category == "Tête":
+    if shot_category == "Penalty": return 0.74
+    if shot_category == "Tête" and model_head:
         return model_head.predict_proba([[angle, dist]])[0][1]
 
-    # Cas du Pied
-    dist_shooter_gk = np.sqrt((s_x - gk_x) ** 2 + (s_y - gk_y) ** 2)
+    dist_s_gk = np.sqrt((sx - gx) ** 2 + (sy - gy) ** 2)
 
-    if dist > 20 and s_x > 103.5 and (s_y < 20 or s_y > 60):  # Logique Outside
-        minus = s_x - gk_x
-        feat = np.array([[angle, s_y, dist_shooter_gk, dist, minus]])
-        dm = xgb.DMatrix(feat, feature_names=['angle', 'y', 'DistanceShooterGk', 'distance', 'minus'])
+    if dist > 20 and sx > 103.5 and (sy < 20 or sy > 60):
+        if not model_outside: return 0.02
+        dm = xgb.DMatrix(np.array([[angle, sy, dist_s_gk, dist, sx - gx]]),
+                         feature_names=['angle', 'y', 'DistanceShooterGk', 'distance', 'minus'])
         return model_outside.predict(dm)[0]
     else:
-        dist_gk = calculateDistance(gk_x, gk_y)
-        if is_1v1:
-            feat = np.array([[angle, dist, dist_shooter_gk, dist_gk, num_opp]])
-            dm = xgb.DMatrix(feat, feature_names=['angle', 'distance', 'DistanceShooterGk', 'DistanceGk',
-                                                  'num_opposing_players'])
+        dist_gk = calculateDistance(gx, gy)
+        if is_1v1 and model_1v1:
+            dm = xgb.DMatrix(np.array([[angle, dist, dist_s_gk, dist_gk, num_opp]]),
+                             feature_names=['angle', 'distance', 'DistanceShooterGk', 'DistanceGk',
+                                            'num_opposing_players'])
             return model_1v1.predict(dm)[0]
-        else:
-            feat = np.array([[angle, dist, gk_y, gk_x, dist_gk, num_opp]])
-            dm = xgb.DMatrix(feat,
+        elif model_not_1v1:
+            dm = xgb.DMatrix(np.array([[angle, dist, gy, gx, dist_gk, num_opp]]),
                              feature_names=['angle', 'distance', 'y_gk', 'x_gk', 'DistanceGk', 'num_opposing_players'])
             return model_not_1v1.predict(dm)[0]
+    return 0.05
 
 
 xg_val = get_prediction()
@@ -135,30 +140,50 @@ with col1:
                   pitch_color='#224422', line_color='white', goal_type='box')
     fig, ax = pitch.draw(figsize=(10, 7))
 
-    # Dessiner les buts (green dans ton code)
-    ax.scatter([120, 120], [36, 44], color="lime", s=100, zorder=5)
+    # Dessin des joueurs
+    pitch.scatter(st.session_state.s_x, st.session_state.s_y, s=300,
+                  c='#e74c3c', edgecolors='white', marker='o', label='Buteur', ax=ax, zorder=3)
 
-    # Shooter
-    pitch.scatter(s_x, s_y, s=300, c='#e74c3c', edgecolors='white', marker='o', label='Buteur', ax=ax)
-    # Gardien (si applicable)
     if shot_category == "Pied":
-        pitch.scatter(gk_x, gk_y, s=250, c='#3498db', edgecolors='white', marker='s', label='Gardien', ax=ax)
+        pitch.scatter(st.session_state.gk_x, st.session_state.gk_y, s=250,
+                      c='#3498db', edgecolors='white', marker='s', label='Gardien', ax=ax, zorder=3)
 
-    # Ligne de tir
-    ax.plot([s_x, 120], [s_y, 40], color='white', linestyle='--', alpha=0.3)
+    # Ligne de visée
+    ax.plot([st.session_state.s_x, 120], [st.session_state.s_y, 40], color='white', linestyle='--', alpha=0.3)
+    ax.legend(facecolor='#224422', edgecolor='white', labelcolor='white', loc='upper left')
 
-    ax.legend(facecolor='#224422', edgecolor='white', labelcolor='white')
-    st.pyplot(fig)
+    # Conversion en Image PIL
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches='tight', pad_inches=0)
+    buf.seek(0)
+    img = Image.open(buf)
+
+    # Affichage du terrain cliquable
+    coords = streamlit_image_coordinates(img, use_column_width=True)
+
+    if coords:
+        # CALCUL CORRIGÉ : x normal, y inversé
+        st.session_state.s_x_last = st.session_state.s_x
+
+        new_x = (coords["x"] / coords["width"]) * 120
+        # Inversion de l'axe Y (1 - ratio) car l'image commence en haut
+        new_y = (1 - (coords["y"] / coords["height"])) * 80
+
+        if selection_mode == "Le Buteur":
+            st.session_state.s_x, st.session_state.s_y = new_x, new_y
+        else:
+            st.session_state.gk_x, st.session_state.gk_y = new_x, new_y
+
+        st.rerun()
 
 with col2:
     st.metric(label="Probabilité de but (xG)", value=f"{xg_val:.3f}")
-
-    # Barre de progression pour le visuel
     st.progress(min(float(xg_val), 1.0))
 
-    st.markdown("### 📊 Statistiques du tir")
-    st.write(f"**Distance au but :** {calculateDistance(s_x, s_y):.1f}m")
-    st.write(f"**Angle de tir :** {calculateAngle(s_x, s_y):.1f}°")
+    st.markdown("### 📊 Données du tir")
+    st.write(f"**Distance au but :** {calculateDistance(st.session_state.s_x, st.session_state.s_y):.1f}m")
+    st.write(f"**Angle de tir :** {calculateAngle(st.session_state.s_x, st.session_state.s_y):.1f}°")
+    st.write(f"**Position Buteur :** X={st.session_state.s_x:.1f}, Y={st.session_state.s_y:.1f}")
 
     if xg_val > 0.3:
         st.success("C'est une grosse occasion !")
